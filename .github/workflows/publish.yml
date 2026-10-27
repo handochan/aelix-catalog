@@ -1,0 +1,247 @@
+name: Publish the model catalog
+
+# ADR-0264 §4.2 (handochan/aelix-ai). Publishes aelix's own model catalog,
+# without transport, to this repository's Pages:
+#   https://handochan.github.io/aelix-catalog/v1/index.json
+#
+# Two jobs. `build` checks aelix-ai out read-only at the newest commit whose
+# `ci.yml` push run on `main` succeeded, runs its scripts/publish_catalog.py
+# (fetch models.dev and OpenRouter, plan, check, write the revision, the next
+# index and a summary) and uploads them as an artifact. It cannot write.
+# `publish` runs no aelix-ai code and no uv: tools/publish_job.py (stdlib, in
+# this repository) takes only `v1/revisions/<name>.json` and `v1/index.json`
+# from the artifact, re-reads the hold at this repository's current head,
+# checks the content address and the index's shape, commits, pushes without
+# force and deploys Pages from that tree. `rollback`, `withdraw` and
+# `release-hold` skip `build`.
+#
+# No stored secret: the only token is this run's GITHUB_TOKEN, which can write
+# only to this repository, and only in `publish`.
+#
+# Third-party actions are pinned to a commit SHA with the tag in a comment, as
+# aelix-ai's ci.yml and pages.yml pin theirs.
+
+on:
+  schedule:
+    # Weekdays 10:17, 12:17 and 14:17 KST (UTC+9; cron is UTC): pi's three
+    # scheduled slots, in the owner's zone, so a bad revision meets a person.
+    - cron: "17 1,3,5 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "publish (build from main), rollback, withdraw (the kill switch) or release-hold"
+        type: choice
+        options: [publish, rollback, withdraw, release-hold]
+        default: publish
+      revision:
+        description: "rollback: the deployed revision to point the index at (sha256-<64 hex>)"
+        type: string
+        default: ""
+      reason:
+        description: "rollback / withdraw: why (recorded in control/hold.json)"
+        type: string
+        default: ""
+      source_commit:
+        description: "publish: an aelix-ai commit to build from instead of the newest green main (its own ci.yml push run must have passed)"
+        type: string
+        default: ""
+      max_additions:
+        description: "publish: raise the 100-new-ids cap for this one run"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Runs never interleave index commits or deploys. `queue: max` keeps up to 100
+# pending runs, so a slot cannot replace a rollback waiting behind a long run
+# (the default cancels the older pending run). GitHub does not guarantee their
+# order; either order ends in the rollback's state (ADR-0264 §4.2).
+concurrency:
+  group: aelix-catalog
+  cancel-in-progress: false
+  queue: max
+
+env:
+  AELIX_AI: handochan/aelix-ai
+
+jobs:
+  build:
+    if: ${{ github.event_name == 'schedule' || inputs.action == 'publish' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.build.outputs.state }}
+    steps:
+      - name: Check out this repository (the current index and the hold)
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          path: catalog
+          persist-credentials: false
+
+      - name: Stop while a hold exists
+        id: hold
+        run: python3 catalog/tools/publish_job.py check-hold --repo catalog --github-output "$GITHUB_OUTPUT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Choose the aelix-ai commit (a green ci.yml push run on main)
+        if: steps.hold.outputs.held == 'false'
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          # Name the workflow file, the event and the branch: the repository-wide
+          # /actions/runs also returns dependency-graph runs (ADR-0264 §3.2).
+          query="repos/$AELIX_AI/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1"
+          if [ -n "$REQUESTED" ]; then
+            if ! printf '%s' "$REQUESTED" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::source_commit must be a full 40-hex commit"; exit 1
+            fi
+            query="$query&head_sha=$REQUESTED"
+          fi
+          sha="$(gh api "$query" --jq '.workflow_runs[0].head_sha // empty')"
+          if [ -z "$sha" ]; then
+            echo "::error::no successful ci.yml push run on main${REQUESTED:+ for $REQUESTED}"; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Building from aelix-ai \`$sha\`." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out aelix-ai at that commit, with its history (the lineage reads it)
+        if: steps.hold.outputs.held == 'false'
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ env.AELIX_AI }}
+          ref: ${{ steps.source.outputs.sha }}
+          path: aelix-ai
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The commit is on main
+        if: steps.hold.outputs.held == 'false'
+        env:
+          SHA: ${{ steps.source.outputs.sha }}
+        run: git -C aelix-ai merge-base --is-ancestor "$SHA" origin/main
+
+      - name: Install uv
+        if: steps.hold.outputs.held == 'false'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          # aelix-ai's ci.yml pin; bump the two together.
+          version: "0.12.23"
+          checksum: "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6"
+
+      - name: Install aelix-ai as locked
+        if: steps.hold.outputs.held == 'false'
+        working-directory: aelix-ai
+        run: uv sync --frozen
+
+      - name: Build, check and summarise the next revision
+        if: steps.hold.outputs.held == 'false'
+        id: build
+        working-directory: aelix-ai
+        env:
+          SHA: ${{ steps.source.outputs.sha }}
+          MAX_ADDITIONS: ${{ inputs.max_additions }}
+        run: |
+          set -uo pipefail
+          args=(build --fetch --catalog-repo ../catalog --out ../out --source-commit "$SHA")
+          if [ -n "$MAX_ADDITIONS" ]; then args+=(--max-additions "$MAX_ADDITIONS"); fi
+          uv run --frozen python scripts/publish_catalog.py "${args[@]}" > ../build.log 2>&1
+          status=$?
+          tail -n 40 ../build.log
+          if [ -f ../out/summary.md ]; then cat ../out/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+          state="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' ../out/result.json 2>/dev/null || echo failed)"
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload the revision, the next index and the summary
+        if: steps.build.outputs.state == 'publish'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: catalog-build
+          path: out
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    # A skipped `build` (rollback, withdraw, release-hold) must not skip this,
+    # so the condition uses a status function; a failed or cancelled build does.
+    if: >-
+      ${{ !cancelled() && !failure() && (
+        needs.build.outputs.state == 'publish' ||
+        (github.event_name == 'workflow_dispatch' && inputs.action != 'publish')
+      ) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out this repository at its current head
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # The branch, not the run's sha: a hold added by hand while `build`
+          # ran must win (ADR-0264 §4.2). History for rollback and pruning.
+          ref: ${{ github.event.repository.default_branch }}
+          path: catalog
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the build
+        if: needs.build.outputs.state == 'publish'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: catalog-build
+          path: artifact
+
+      - name: Decide, check and commit (this repository's own code)
+        id: decide
+        env:
+          ACTION: ${{ inputs.action || 'publish' }}
+          REVISION: ${{ inputs.revision }}
+          REASON: ${{ inputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          python3 catalog/tools/publish_job.py "$ACTION" --repo catalog --artifact artifact
+          --revision "$REVISION" --reason "$REASON" --run "$RUN_URL"
+          --github-output "$GITHUB_OUTPUT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push without force (a moved branch refuses, and nothing is published)
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          git -C catalog -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push origin "HEAD:refs/heads/$BRANCH"
+
+      - name: Stage v1/ for Pages (control/ is never deployed)
+        if: steps.decide.outputs.deploy == 'true'
+        run: python3 catalog/tools/publish_job.py stage-site --repo catalog --out _site
+
+      - name: Configure Pages
+        if: steps.decide.outputs.deploy == 'true'
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+
+      - name: Upload the Pages artifact
+        if: steps.decide.outputs.deploy == 'true'
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: _site
+
+      - name: Deploy Pages
+        # A push made with GITHUB_TOKEN starts no other workflow, so this run
+        # deploys what it pushed.
+        if: steps.decide.outputs.deploy == 'true'
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
