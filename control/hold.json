@@ -1,0 +1,7 @@
+{
+  "action": "rollback",
+  "revision": "sha256-1e01c1c0a00d0e7004d44ee5a916f0ef8cf892c8bde0d45912a956e414e97faa",
+  "reason": "ADR-0264 \u00a78 check: a rollback dispatched while a slot runs, with the next slot queued behind it (handochan/aelix-ai#172)",
+  "run": "https://github.com/handochan/aelix-catalog/actions/runs/40539435075",
+  "at": "2026-10-27T16:17:44Z"
+}
