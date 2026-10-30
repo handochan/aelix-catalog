@@ -7,6 +7,8 @@
   publish: `{"action", "revision" (rollback only), "reason", "run", "at"}`.
 - You may also add it by hand in the GitHub UI, with any content (a file that is not
   JSON still holds). The publish job re-reads it at the branch head right before it
-  commits, so a hand-added hold also wins over a build that started before it.
+  commits, so a hand-added hold also wins over a build that started before it. The
+  build job reads it at the branch head too, so a run that waited behind a rollback
+  stops on the rollback's hold before it builds.
 - Only the `release-hold` dispatch (or deleting the file) removes it. The next slot
   then publishes from aelix-ai's `main`.

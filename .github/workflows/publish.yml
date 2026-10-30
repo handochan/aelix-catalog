@@ -4,10 +4,12 @@ name: Publish the model catalog
 # without transport, to this repository's Pages:
 #   https://handochan.github.io/aelix-catalog/v1/index.json
 #
-# Two jobs. `build` checks aelix-ai out read-only at the newest commit whose
-# `ci.yml` push run on `main` succeeded, runs its scripts/publish_catalog.py
-# (fetch models.dev and OpenRouter, plan, check, write the revision, the next
-# index and a summary) and uploads them as an artifact. It cannot write.
+# Two jobs. `build` reads the hold and the current index at this repository's
+# current head and stops on a hold. Otherwise it checks aelix-ai out read-only
+# at the newest commit whose `ci.yml` push run on `main` succeeded, runs its
+# scripts/publish_catalog.py (fetch models.dev and OpenRouter, plan, check,
+# write the revision, the next index and a summary) and uploads them as an
+# artifact. It cannot write.
 # `publish` runs no aelix-ai code and no uv: tools/publish_job.py (stdlib, in
 # this repository) takes only `v1/revisions/<name>.json` and `v1/index.json`
 # from the artifact, re-reads the hold at this repository's current head,
@@ -75,9 +77,13 @@ jobs:
     outputs:
       state: ${{ steps.build.outputs.state }}
     steps:
-      - name: Check out this repository (the current index and the hold)
+      - name: Check out this repository at its current head (the current index and the hold)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
+          # The branch, not the run's sha: a run that waited behind a rollback
+          # was queued at the commit before the rollback's hold, and must stop
+          # here on that hold, not build (handochan/aelix-ai#616).
+          ref: ${{ github.event.repository.default_branch }}
           path: catalog
           persist-credentials: false
 

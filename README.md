@@ -17,7 +17,10 @@ The design is aelix-ai's ADR-0264 (`docs/decisions/0264-*.md`). In short:
 - **When.** Weekdays at 10:17, 12:17 and 14:17 KST, from the newest aelix-ai commit
   whose `ci.yml` push run on `main` succeeded, and by hand. A slot with nothing new
   commits nothing. All logic lives in aelix-ai (`scripts/publish_catalog.py`); the
-  only code here is `tools/publish_job.py`, which the job that can write runs.
+  only code here is `tools/publish_job.py`, which the job that can write runs, and
+  its stdlib tests (`python3 -m unittest discover -s tests`), which
+  `.github/workflows/test.yml` runs on a push to `main` or a pull request that changes
+  `tools/`, `tests/` or a workflow.
 - **Repair.** `Actions -> Publish the model catalog -> Run workflow`:
   - `rollback` with `revision=sha256-...` points the index at a deployed revision;
   - `withdraw` publishes an index with no catalog (the kill switch);

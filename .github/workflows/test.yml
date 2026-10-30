@@ -1,0 +1,30 @@
+name: Test the publish job
+
+# tests/test_publish_job.py: tools/publish_job.py, the only code the publish
+# job that can write runs (handochan/aelix-ai#616). Stdlib unittest with the
+# runner's own python3, which is what publish.yml runs that file with: no
+# setup-python, no dependencies, no network. A publication's own push is made
+# with GITHUB_TOKEN and starts no workflow, so only a change by hand runs this.
+
+on:
+  push:
+    branches: [main]
+    paths: ["tools/**", "tests/**", ".github/workflows/**"]
+  pull_request:
+    paths: ["tools/**", "tests/**", ".github/workflows/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run the publish job's tests
+        run: python3 --version && python3 -B -m unittest discover -s tests -v

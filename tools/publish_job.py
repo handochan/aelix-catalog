@@ -13,7 +13,7 @@ a rollback's or a withdrawal's index, the pruning) it decides itself.
 Actions (each prints Markdown for the job summary on stdout and, with
 ``--github-output``, ``changed=``/``deploy=``/``held=`` lines to that file):
 
-    check-hold      is control/hold.json present? (the build job's first step)
+    check-hold      is control/hold.json present? (the build job's step after its checkout)
     publish         take the build's revision and index, unless a hold exists
     rollback        point the index at a deployed revision, and hold
     withdraw        publish an index with no catalog, and hold
@@ -191,8 +191,20 @@ def _write(repo: Path, rel: str, data: bytes) -> None:
 
 
 def _commit(repo: Path, message: str) -> bool:
-    _git(repo, "add", "-A", "v1", "control")
-    if not _git(repo, "status", "--porcelain", "--", "v1", "control").strip():
+    # `git add` refuses a path that matches nothing on disk or in the index
+    # ("pathspec 'control' did not match any files"), so only the ones that
+    # match are named: a checkout without `control/` still commits
+    # (handochan/aelix-ai#616). A path deleted on disk but tracked still
+    # matches, so a removed hold is committed as a removal.
+    paths = [
+        rel
+        for rel in ("v1", "control")
+        if (repo / rel).exists() or _git(repo, "ls-files", "--", rel).strip()
+    ]
+    if not paths:
+        return False
+    _git(repo, "add", "-A", "--", *paths)
+    if not _git(repo, "status", "--porcelain", "--", *paths).strip():
         return False
     _git(
         repo,
@@ -387,7 +399,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "check-hold":
             hold = read_hold(repo)
             output(held=hold is not None)
-            print(_hold_summary(hold) if hold else "No hold.")
+            # `is not None`: a hold file of `{}` is a hold, and an empty dict is falsy.
+            print(_hold_summary(hold) if hold is not None else "No hold.")
             return 0
         if args.action == "stage-site":
             if not args.out:
