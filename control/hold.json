@@ -1,0 +1,7 @@
+{
+  "action": "rollback",
+  "revision": "sha256-97bc9107786d5b515650a90582a8ec3489ceb04308a8beea9483c2e6b8a2efb0",
+  "reason": "handochan/aelix-ai#616 measurement: a run queued behind a rollback stops at its hold check. Points at the current revision; release-hold follows.",
+  "run": "https://github.com/handochan/aelix-catalog/actions/runs/41149693586",
+  "at": "2026-10-31T00:21:48Z"
+}
